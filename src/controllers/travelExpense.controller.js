@@ -275,12 +275,9 @@
 //     next(err);
 //   }
 // };
-import mime from "mime-types";
-import { supabase } from "../config/supabase.js";
 import { tenantDb } from "../utils/tenantDb.js";
 import { getDirectReportIds } from "../utils/hierarchy.js";
-
-const BUCKET = "receipts";
+import { saveFile, deleteLocalFile } from "../utils/localStorage.js";
 // employee_id is usually an employee_accounts id, but has no FK constraint —
 // the super admin can also submit their own expense (employee_id = an
 // admin_users id), and Postgres can't FK a column to "one of two tables".
@@ -404,15 +401,8 @@ export const createExpense = async (req, res, next) => {
     let receipt_url = null;
     let receipt_file_name = null;
     if (req.file) {
-      const filePath = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-      const contentType = mime.lookup(req.file.originalname) || req.file.mimetype;
-      const { error: uploadError } = await supabase.storage
-        .from(BUCKET)
-        .upload(filePath, req.file.buffer, { contentType, upsert: false });
-      if (uploadError) throw uploadError;
-
-      const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(filePath);
-      receipt_url = urlData.publicUrl;
+      const filename = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
+      receipt_url = await saveFile(req.file.buffer, "receipts", filename);
       receipt_file_name = req.file.originalname;
     }
 
@@ -559,10 +549,7 @@ export const deleteExpense = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Only pending expenses can be deleted" });
     }
 
-    if (expense.receipt_url) {
-      const parts = expense.receipt_url.split(`/${BUCKET}/`);
-      if (parts.length > 1) await supabase.storage.from(BUCKET).remove([parts[1]]);
-    }
+    await deleteLocalFile(expense.receipt_url);
 
     const { error } = await db.from("travel_expenses").delete().eq("id", req.params.id);
     if (error) throw error;

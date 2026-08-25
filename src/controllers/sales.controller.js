@@ -404,9 +404,8 @@
 // };
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import mime from "mime-types";
-import { supabase } from "../config/supabase.js";
 import { tenantDb } from "../utils/tenantDb.js";
+import { saveFile } from "../utils/localStorage.js";
 import { wouldCreateCycle } from "../utils/hierarchy.js";
 import { resolveAdminUserId } from "./employee.controller.js";
 
@@ -421,8 +420,6 @@ import { resolveAdminUserId } from "./employee.controller.js";
 // `password` is deliberately excluded — never send a password hash to the
 // frontend, even hashed.
 const TEAM_SELECT = "id, name, role_title, branch, email, phone:phone_number, commission_rate, target, reports_to_id, admin_user_id, joined_at:created_at";
-
-const LEAD_DOCUMENTS_BUCKET = "lead-documents";
 
 // GET /api/sales/team
 export const getTeam = async (req, res, next) => {
@@ -669,18 +666,12 @@ export const uploadLeadDocument = async (req, res, next) => {
     if (fetchError) throw fetchError;
     if (!existing) return res.status(404).json({ success: false, message: "Lead not found" });
 
-    const filePath = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
-    const contentType = mime.lookup(req.file.originalname) || req.file.mimetype;
-    const { error: uploadError } = await supabase.storage
-      .from(LEAD_DOCUMENTS_BUCKET)
-      .upload(filePath, req.file.buffer, { contentType, upsert: false });
-    if (uploadError) throw uploadError;
-
-    const { data: urlData } = supabase.storage.from(LEAD_DOCUMENTS_BUCKET).getPublicUrl(filePath);
+    const filename = `${Date.now()}_${req.file.originalname.replace(/\s+/g, "_")}`;
+    const documentUrl = await saveFile(req.file.buffer, "leads", filename);
 
     const { data, error } = await db
       .from("sales_leads")
-      .update({ document_url: urlData.publicUrl, document_file_name: req.file.originalname })
+      .update({ document_url: documentUrl, document_file_name: req.file.originalname })
       .eq("id", id)
       .select("*")
       .single();

@@ -1,9 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { supabase } from "../config/supabase.js";
 import { tenantDb, publicDb } from "../utils/tenantDb.js";
-
-const AVATAR_BUCKET = "avatars";
+import { saveFile, deleteLocalFile } from "../utils/localStorage.js";
 
 // POST /api/partner-auth/login
 export const partnerLogin = async (req, res, next) => {
@@ -185,29 +183,17 @@ export const uploadAvatar = async (req, res, next) => {
       });
     }
 
-    const mimeMap = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", heic: "image/heic", heif: "image/heif" };
-    const contentType = mimeMap[ext] || req.file.mimetype || "image/jpeg";
     const partnerId = req.user.id;
 
     const { data: existing } = await db.from("partners").select("profile_image_url").eq("id", partnerId).single();
-    if (existing?.profile_image_url) {
-      const parts = existing.profile_image_url.split(`/${AVATAR_BUCKET}/`);
-      if (parts.length > 1) {
-        await supabase.storage.from(AVATAR_BUCKET).remove([parts[1]]);
-      }
-    }
+    await deleteLocalFile(existing?.profile_image_url);
 
-    const filePath = `${partnerId}/${Date.now()}.${ext}`;
-    const { error: uploadError } = await supabase.storage
-      .from(AVATAR_BUCKET)
-      .upload(filePath, req.file.buffer, { contentType, upsert: true });
-    if (uploadError) throw uploadError;
-
-    const { data: urlData } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(filePath);
+    const filename = `${partnerId}_${Date.now()}.${ext}`;
+    const avatarUrl = await saveFile(req.file.buffer, "avatars", filename);
 
     const { data, error } = await db
       .from("partners")
-      .update({ profile_image_url: urlData.publicUrl })
+      .update({ profile_image_url: avatarUrl })
       .eq("id", partnerId)
       .select()
       .single();
@@ -227,12 +213,7 @@ export const deleteAvatar = async (req, res, next) => {
     const partnerId = req.user.id;
 
     const { data: existing } = await db.from("partners").select("profile_image_url").eq("id", partnerId).single();
-    if (existing?.profile_image_url) {
-      const parts = existing.profile_image_url.split(`/${AVATAR_BUCKET}/`);
-      if (parts.length > 1) {
-        await supabase.storage.from(AVATAR_BUCKET).remove([parts[1]]);
-      }
-    }
+    await deleteLocalFile(existing?.profile_image_url);
 
     const { data, error } = await db
       .from("partners")

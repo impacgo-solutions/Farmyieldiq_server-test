@@ -383,6 +383,8 @@ import helmet from "helmet";
 import morgan from "morgan";
 import dotenv from "dotenv";
 import multer from "multer";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 // ── Middleware ───────────────────────────────────────────────
 import { authenticate, requireSuperAdmin } from "./src/middleware/auth.js";
@@ -456,6 +458,9 @@ import {
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
 const app = express();
 app.disable("etag");
 
@@ -502,6 +507,9 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 },
 });
+
+// Serve uploaded files (documents, avatars, receipts, leads)
+app.use("/uploads", express.static(join(__dirname, "uploads")));
 
 // ============================================================
 // HEALTH CHECK
