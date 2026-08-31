@@ -3,7 +3,8 @@ import jwt from "jsonwebtoken";
 import { supabase } from "../config/supabase.js";
 import { tenantDb } from "../utils/tenantDb.js";
 import { sendSignupNotification } from "../utils/notifyEmail.js";
-import { isTenantExpired, TRIAL_EXPIRED_CODE, TRIAL_EXPIRED_MESSAGE } from "../utils/subscription.js";
+import { createTenantAdmin, TenantProvisioningError } from "../utils/tenantProvisioning.js";
+import { getTenantTrialSummary } from "../utils/trialManagement.js";
 
 // admin_users holds only the super-admin account(s). Staff logins created
 // via the Employees screen live in their own employee_accounts table (see
@@ -60,12 +61,16 @@ import { isTenantExpired, TRIAL_EXPIRED_CODE, TRIAL_EXPIRED_MESSAGE } from "../u
 // }
 // };
 const _findAccount = async (email) => {
-  // Check global admin first
+  // Check global admin first. Deliberately no .eq("is_active", true) here —
+  // a suspended (or trial-expired) tenant admin can still log in; the
+  // Dashboard shows a popup instead of the API blocking access. Employee
+  // accounts below keep their own is_active check — that's an individual
+  // staff member being deactivated by their own admin, a separate concept
+  // from the whole tenant being suspended by the Super Admin.
   const { data: admin } = await supabase
     .from("admin_users")
     .select("*")
     .eq("email", email)
-    .eq("is_active", true)
     .maybeSingle();
 
   if (admin) {
@@ -119,20 +124,26 @@ const _findAccount = async (email) => {
   return null;
 };
 
-const _toUserResponse = (account, isEmployee) => ({
+// trialInfo ({is_active, trial_status, days_left}) is the ORG's state —
+// same for the admin and every employee under them — so the Dashboard can
+// show its "trial expired"/"suspended" popup without the API ever needing
+// to block the request itself. See getTenantTrialSummary in trialManagement.js.
+const _toUserResponse = (account, isEmployee, trialInfo) => ({
   id: account.id,
   email: account.email,
   name: account.name,
   role: isEmployee ? account.role_title : account.role,
   is_employee: isEmployee,
   tenant_schema: account.tenant_schema,
-  is_platform_admin: !isEmployee && account.is_platform_admin === true,
   allowed_modules: isEmployee
       ? account.allowed_modules
       : account.allowed_modules,
   reports_to_id: isEmployee
       ? account.reports_to_id
       : null,
+  is_active: trialInfo.is_active,
+  trial_status: trialInfo.trial_status,
+  days_left: trialInfo.days_left,
 });
 // POST /api/auth/login
 export const login = async (req, res, next) => {
@@ -187,13 +198,9 @@ if (!isValid) {
 console.log("✅ Login successful");
 console.log("=================================");
 
-if (await isTenantExpired(account.tenant_schema)) {
-  return res.status(402).json({
-    success: false,
-    code: TRIAL_EXPIRED_CODE,
-    message: TRIAL_EXPIRED_MESSAGE,
-  });
-}
+// No trial/suspension check here — login always succeeds once credentials
+// are valid. trialInfo below is only for the Dashboard's popup.
+const trialInfo = await getTenantTrialSummary(account.tenant_schema, isEmployee ? null : account);
 
   const token = jwt.sign(
   {
@@ -202,7 +209,6 @@ if (await isTenantExpired(account.tenant_schema)) {
     role: isEmployee ? account.role_title : account.role,
     tenant_schema: account.tenant_schema,
     is_employee: isEmployee,
-    is_platform_admin: !isEmployee && account.is_platform_admin === true,
     allowed_modules: account.allowed_modules
   },
   process.env.JWT_SECRET,
@@ -212,7 +218,7 @@ if (await isTenantExpired(account.tenant_schema)) {
 );
     res.status(200).json({
       success: true,
-      data: { token, user: _toUserResponse(account, isEmployee) },
+      data: { token, user: _toUserResponse(account, isEmployee, trialInfo) },
     });
   } catch (err) {
     next(err);
@@ -226,7 +232,11 @@ export const getMe = async (req, res, next) => {
     if (!found) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
-    res.status(200).json({ success: true, data: _toUserResponse(found.account, found.isEmployee) });
+    const trialInfo = await getTenantTrialSummary(
+      found.account.tenant_schema,
+      found.isEmployee ? null : found.account
+    );
+    res.status(200).json({ success: true, data: _toUserResponse(found.account, found.isEmployee, trialInfo) });
   } catch (err) {
     next(err);
   }
@@ -237,53 +247,14 @@ export const register = async (req, res, next) => {
   try {
     const { email, password, name, organization_name } = req.body;
 
-    if (!email || !password || !name || !organization_name) {
-      return res.status(400).json({
-        success: false,
-        message: "email, password, name, and organization_name are required",
-      });
-    }
-
-    const tenant_schema = organization_name
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .substring(0, 50);
-
-    if (!tenant_schema) {
-      return res.status(400).json({
-        success: false,
-        message: "organization_name must contain at least one alphanumeric character",
-      });
-    }
-
-    const hashed = await bcrypt.hash(password, 10);
-
-    const { data, error } = await supabase
-      .from("admin_users")
-      .insert({
-        email: email.toLowerCase().trim(),
-        password: hashed,
-        name: name.trim(),
-        tenant_schema,
-        role: "super_admin",
-        is_employee: false,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      if (error.code === "23505" || (error.message && error.message.includes("unique"))) {
-        const isEmail = error.message && error.message.toLowerCase().includes("email");
-        return res.status(409).json({
-          success: false,
-          message: isEmail
-            ? "An account with this email already exists"
-            : "An organization with this name already exists",
-        });
+    let data;
+    try {
+      data = await createTenantAdmin({ email, password, name, organizationName: organization_name });
+    } catch (err) {
+      if (err instanceof TenantProvisioningError) {
+        return res.status(err.statusCode).json({ success: false, message: err.message });
       }
-      throw error;
+      throw err;
     }
 
     // Fire-and-forget notification to info@impacgo.com
@@ -296,16 +267,17 @@ export const register = async (req, res, next) => {
         role: data.role,
         tenant_schema: data.tenant_schema,
         is_employee: false,
-        is_platform_admin: false,
         allowed_modules: data.allowed_modules,
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
     );
 
+    const trialInfo = await getTenantTrialSummary(data.tenant_schema, data);
+
     res.status(201).json({
       success: true,
-      data: { token, user: _toUserResponse(data, false) },
+      data: { token, user: _toUserResponse(data, false, trialInfo) },
     });
   } catch (err) {
     next(err);

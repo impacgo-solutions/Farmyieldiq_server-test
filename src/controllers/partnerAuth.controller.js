@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { tenantDb, publicDb } from "../utils/tenantDb.js";
+import { getTenantTrialSummary } from "../utils/trialManagement.js";
 import { saveFile, deleteLocalFile } from "../utils/localStorage.js";
 
 // POST /api/partner-auth/login
@@ -64,9 +65,14 @@ export const partnerLogin = async (req, res, next) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || "30d" }
     );
 
+    // Login always succeeds regardless of trial/suspension state — the
+    // Partner app blocks its own screens client-side using this, exactly
+    // like the Admin app already does.
+    const trialInfo = await getTenantTrialSummary(registry.schema_name);
+
     res.status(200).json({
       success: true,
-      data: { token, user: _toProfileResponse(partner) },
+      data: { token, user: _toProfileResponse(partner, trialInfo) },
     });
   } catch (err) {
     next(err);
@@ -86,7 +92,8 @@ export const getPartnerMe = async (req, res, next) => {
     if (error || !partner) {
       return res.status(404).json({ success: false, message: "Partner not found" });
     }
-    res.status(200).json({ success: true, data: _toProfileResponse(partner) });
+    const trialInfo = await getTenantTrialSummary(req.tenantSchema);
+    res.status(200).json({ success: true, data: _toProfileResponse(partner, trialInfo) });
   } catch (err) {
     next(err);
   }
@@ -114,7 +121,8 @@ export const updatePartnerProfile = async (req, res, next) => {
       .single();
 
     if (error) throw error;
-    res.status(200).json({ success: true, data: _toProfileResponse(data) });
+    const trialInfo = await getTenantTrialSummary(req.tenantSchema);
+    res.status(200).json({ success: true, data: _toProfileResponse(data, trialInfo) });
   } catch (err) {
     next(err);
   }
@@ -199,7 +207,8 @@ export const uploadAvatar = async (req, res, next) => {
       .single();
     if (error) throw error;
 
-    res.status(200).json({ success: true, message: "Avatar updated successfully", data: _toProfileResponse(data) });
+    const trialInfo = await getTenantTrialSummary(req.tenantSchema);
+    res.status(200).json({ success: true, message: "Avatar updated successfully", data: _toProfileResponse(data, trialInfo) });
   } catch (err) {
     console.error("uploadAvatar error:", err);
     next(err);
@@ -223,13 +232,14 @@ export const deleteAvatar = async (req, res, next) => {
       .single();
     if (error) throw error;
 
-    res.status(200).json({ success: true, data: _toProfileResponse(data) });
+    const trialInfo = await getTenantTrialSummary(req.tenantSchema);
+    res.status(200).json({ success: true, data: _toProfileResponse(data, trialInfo) });
   } catch (err) {
     next(err);
   }
 };
 
-function _toProfileResponse(p) {
+function _toProfileResponse(p, trialInfo = {}) {
   return {
     id: p.id,
     full_name: p.name,
@@ -253,5 +263,10 @@ function _toProfileResponse(p) {
     account_number_masked: p.account_number_masked,
     ifsc_code: p.ifsc_code,
     portfolio_value: p.portfolio_value || 0,
+    is_active: trialInfo.is_active,
+    trial_status: trialInfo.trial_status,
+    days_left: trialInfo.days_left,
+    admin_name: trialInfo.admin_name,
+    admin_email: trialInfo.admin_email,
   };
 }

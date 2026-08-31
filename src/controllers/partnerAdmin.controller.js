@@ -58,6 +58,24 @@ export const createPartner = async (req, res, next) => {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
+
+    // partner_registry.email is the single global identity a partner logs in
+    // with (the Partner app's login screen only ever asks for email —
+    // there's no tenant/company selector), so reject up front if this email
+    // already belongs to a DIFFERENT tenant instead of silently overwriting
+    // the registry mapping and breaking that other tenant's partner's login.
+    const { data: existingRegistry } = await publicDb()
+      .from("partner_registry")
+      .select("schema_name")
+      .eq("email", normalizedEmail)
+      .maybeSingle();
+    if (existingRegistry && existingRegistry.schema_name !== req.tenantSchema) {
+      return res.status(409).json({
+        success: false,
+        message: "This email is already registered as a partner under a different organization",
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Insert into tenant schema
@@ -140,6 +158,22 @@ export const updatePartner = async (req, res, next) => {
       const { data: existing } = await db.from("partners").select("email").eq("id", req.params.id).single();
       oldEmail = existing?.email;
       updates.email = updates.email.toLowerCase().trim();
+
+      // Same cross-tenant collision guard as createPartner — only relevant
+      // when the email is actually changing to something new.
+      if (updates.email !== oldEmail) {
+        const { data: existingRegistry } = await publicDb()
+          .from("partner_registry")
+          .select("schema_name")
+          .eq("email", updates.email)
+          .maybeSingle();
+        if (existingRegistry && existingRegistry.schema_name !== req.tenantSchema) {
+          return res.status(409).json({
+            success: false,
+            message: "This email is already registered as a partner under a different organization",
+          });
+        }
+      }
     }
     if (updates.password) updates.password = await bcrypt.hash(updates.password, 10);
 

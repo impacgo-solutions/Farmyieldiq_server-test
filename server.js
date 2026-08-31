@@ -387,16 +387,28 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 // ── Middleware ───────────────────────────────────────────────
-import { authenticate, requireSuperAdmin } from "./src/middleware/auth.js";
+import { authenticate } from "./src/middleware/auth.js";
+import { authenticatePlatform } from "./src/middleware/platformAuth.js";
 import { errorHandler, notFound } from "./src/middleware/errorHandler.js";
 import { tenantDb } from "./src/utils/tenantDb.js";
 import { startTrialExpiryCron } from "./src/utils/trialExpiryCron.js";
 
+// ── Platform (Super Admin) Controllers ────────────────────────
+import { platformLogin, getPlatformMe } from "./src/controllers/platformAuth.controller.js";
+import {
+  listTenants, getTenant, createTenant,
+  extendTenantTrial, renewTenantSubscription, upgradeTenantPlan, setTenantActiveStatus,
+  getTenantAuditLog, getTenantNotifications, getAllNotifications, getPlatformDashboard,
+  listAdminUsersView,
+} from "./src/controllers/platformTenant.controller.js";
+import {
+  getNotificationSettings, updateNotificationSettings,
+} from "./src/controllers/platformSettings.controller.js";
+import { listRoles, updateRolePermissions } from "./src/controllers/platformRoles.controller.js";
+import { listSettings, updateSettings } from "./src/controllers/platformConfig.controller.js";
+
 // ── Admin Controllers ────────────────────────────────────────
 import { login, getMe, register } from "./src/controllers/auth.controller.js";
-import {
-  listTenants, getPlatformOverview, extendTrial, setTenantSubscribed, setTenantActive,
-} from "./src/controllers/tenantAdmin.controller.js";
 import {
   getAllLayouts, getLayoutById, upsertLayout, updateLayout, deleteLayout,
 } from "./src/controllers/layout.controller.js";
@@ -470,10 +482,27 @@ app.disable("etag");
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
 // ── CORS ─────────────────────────────────────────────────────
-// Allow every origin (reflects the request's Origin back), any method,
-// any headers.
+// ALLOWED_ORIGINS in .env: comma-separated list of allowed origins.
+// If unset (or "*"), every origin is allowed — useful during early dev.
+const _allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 const _corsOptions = {
-  origin: true,
+  origin: (origin, callback) => {
+    // Non-browser / server-to-server requests have no Origin header — allow.
+    if (!origin) return callback(null, true);
+    // Wildcard or explicit match.
+    if (
+      _allowedOrigins.includes("*") ||
+      _allowedOrigins.includes(origin) ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials: true,
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-tenant-schema"],
@@ -682,17 +711,6 @@ app.patch("/api/cows/:id/live-feed", authenticate, updateCowLiveFeed);
 app.get("/api/dashboard/stats", authenticate, getDashboardStats);
 
 // ============================================================
-// PLATFORM SUPER ADMIN — TENANTS / TRIAL / SUBSCRIPTION
-// (cross-tenant; requires is_platform_admin, not just role: super_admin —
-// every org's own admin also carries that role, scoped to their own tenant)
-// ============================================================
-app.get("/api/admin/overview", authenticate, requireSuperAdmin, getPlatformOverview);
-app.get("/api/admin/tenants", authenticate, requireSuperAdmin, listTenants);
-app.patch("/api/admin/tenants/:id/extend-trial", authenticate, requireSuperAdmin, extendTrial);
-app.patch("/api/admin/tenants/:id/subscription", authenticate, requireSuperAdmin, setTenantSubscribed);
-app.patch("/api/admin/tenants/:id/status", authenticate, requireSuperAdmin, setTenantActive);
-
-// ============================================================
 // ADMIN NOTIFICATIONS + REQUESTS
 // ============================================================
 // mark-all-read MUST come before /:id/read
@@ -710,6 +728,37 @@ app.patch("/api/admin/requests/transfers/:id", authenticate, updateAdminTransfer
 app.get("/api/admin/requests/support", authenticate, getAdminSupportMessages);
 app.get("/api/admin/support/:partnerId/thread", authenticate, getAdminSupportThread);
 app.post("/api/admin/requests/support/:partnerId/reply", authenticate, replyToSupportMessage);
+
+// ============================================================
+// PLATFORM (SUPER ADMIN) ROUTES — separate JWT/role, never subject to
+// any tenant's trial/subscription gate (see src/middleware/platformAuth.js)
+// ============================================================
+app.post("/api/platform/auth/login", platformLogin);
+app.get("/api/platform/auth/me", authenticatePlatform, getPlatformMe);
+
+app.get("/api/platform/dashboard", authenticatePlatform, getPlatformDashboard);
+
+app.get("/api/platform/tenants", authenticatePlatform, listTenants);
+app.post("/api/platform/tenants", authenticatePlatform, createTenant);
+app.get("/api/platform/tenants/:id", authenticatePlatform, getTenant);
+app.post("/api/platform/tenants/:id/extend", authenticatePlatform, extendTenantTrial);
+app.post("/api/platform/tenants/:id/renew", authenticatePlatform, renewTenantSubscription);
+app.post("/api/platform/tenants/:id/upgrade", authenticatePlatform, upgradeTenantPlan);
+app.patch("/api/platform/tenants/:id/active", authenticatePlatform, setTenantActiveStatus);
+app.get("/api/platform/tenants/:id/audit-log", authenticatePlatform, getTenantAuditLog);
+app.get("/api/platform/tenants/:id/notifications", authenticatePlatform, getTenantNotifications);
+
+app.get("/api/platform/notifications", authenticatePlatform, getAllNotifications);
+app.get("/api/platform/notification-settings", authenticatePlatform, getNotificationSettings);
+app.put("/api/platform/notification-settings", authenticatePlatform, updateNotificationSettings);
+
+app.get("/api/platform/admin-users", authenticatePlatform, listAdminUsersView);
+
+app.get("/api/platform/roles", authenticatePlatform, listRoles);
+app.put("/api/platform/roles/:id/permissions", authenticatePlatform, updateRolePermissions);
+
+app.get("/api/platform/settings", authenticatePlatform, listSettings);
+app.put("/api/platform/settings", authenticatePlatform, updateSettings);
 
 // ============================================================
 // PARTNER AUTH ROUTES (separate JWT, role: "partner")
